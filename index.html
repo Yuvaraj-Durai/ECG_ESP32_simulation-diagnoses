@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ECG simulator + ESP32 link</title>
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -112,6 +113,23 @@ canvas{display:block; width:100%; height:300px}
 @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]) .ok{color:#6FD08C} }
 :root[data-theme="dark"] .ok{color:#6FD08C}
 .panel.esp{margin:14px 0}
+.esp-row{display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; margin-top:12px}
+.esp-row input[type=text], .esp-row select{
+  width:100%; padding:10px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); font-size:15px}
+.esp-row .field{min-width:200px}
+.esp-row .field.grow{flex:1 1 280px}
+.diag-top{display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap}
+.diag-top p{margin:2px 0 0}
+.reads.diag{grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); margin:12px 0 4px}
+.read .v.good{color:#1B7F3B} .read .v.warn{color:#9A6700} .read .v.bad{color:var(--danger)}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]) .read .v.good{color:#6FD08C} :root:not([data-theme="light"]) .read .v.warn{color:#E3B341} }
+:root[data-theme="dark"] .read .v.good{color:#6FD08C} :root[data-theme="dark"] .read .v.warn{color:#E3B341}
+.tasks{list-style:none; margin:12px 0 0; padding:0; border-top:1px solid var(--line)}
+.tasks li{display:grid; grid-template-columns:92px 64px 1fr auto; gap:10px; padding:8px 0; border-bottom:1px solid var(--line); font-size:14px; align-items:baseline}
+.tasks .n{font-weight:600} .tasks .c,.tasks .d{color:var(--muted)}
+@media (max-width:560px){ .tasks li{grid-template-columns:80px 1fr auto} .tasks .c{display:none} }
+details.raw{margin-top:12px} details.raw summary{cursor:pointer; color:var(--accent); font-weight:600}
+pre#esp-log{margin:8px 0 0; padding:10px; background:var(--bg); border:1px solid var(--line); border-radius:8px; max-height:220px; overflow:auto; font-size:12px; line-height:1.45; white-space:pre-wrap; word-break:break-all}
 .note{margin:18px 0 0; font-size:13px; color:var(--muted); max-width:80ch}
 </style>
 </head>
@@ -152,14 +170,44 @@ canvas{display:block; width:100%; height:300px}
   <section class="panel esp" aria-labelledby="h-esp">
     <div class="esp-head">
       <h2 id="h-esp">ESP32 link</h2>
+      <div class="seg" role="group" aria-label="Connection type" id="mode-seg">
+        <button type="button" data-mode="serial" aria-pressed="true">USB cable</button>
+        <button type="button" data-mode="mqtt" aria-pressed="false">WiFi</button>
+      </div>
+    </div>
+    <div class="esp-row" id="mode-serial">
       <button type="button" class="btn" id="esp-connect">Connect ESP32</button>
     </div>
-    <p class="hint" id="esp-status">Not connected. Sends this exact trace, plus the patient's age, height and weight, to the board over USB serial (115200 baud). Needs Chrome or Edge on a computer.</p>
+    <div class="esp-row" id="mode-mqtt" hidden>
+      <div class="field grow"><label for="mq-url">Broker (WebSocket address)</label>
+        <input id="mq-url" type="text" value="wss://broker.hivemq.com:8884/mqtt" spellcheck="false" autocomplete="off"></div>
+      <div class="field"><label for="mq-code">Secret code (same as ECG_CODE in the sketch)</label>
+        <input id="mq-code" type="text" placeholder="e.g. heart-7391-xyz" spellcheck="false" autocomplete="off"></div>
+      <button type="button" class="btn" id="mq-connect">Connect WiFi</button>
+    </div>
+    <p class="hint" id="esp-status">Not connected. Sends this exact trace, plus the patient's age, height and weight, to the board. USB needs Chrome or Edge on a computer; WiFi works in any browser.</p>
     <div class="esp-line" id="esp-line" hidden>
       <span>ESP32 predicts <strong id="esp-cls">—</strong></span>
       <span id="esp-conf"></span>
       <span id="esp-match"></span>
     </div>
+  </section>
+
+  <section class="panel esp" id="diag" aria-labelledby="h-diag" hidden>
+    <div class="diag-top">
+      <div><h2 id="h-diag">ESP32 diagnostics</h2>
+        <p class="hint" id="diag-age">Reported by the board once per second.</p></div>
+      <div class="field"><label for="mult">Send rate (stress test)</label>
+        <select id="mult" style="width:auto">
+          <option value="1" selected>1× real time</option>
+          <option value="2">2× (double load)</option>
+          <option value="5">5× (five times the load)</option>
+        </select></div>
+    </div>
+    <p class="hint warn" id="mult-note" hidden>Stress test: the signal is sent faster than real time, so the prediction will be wrong. Watch the load, errors and timing instead.</p>
+    <div class="reads diag" id="diag-cards"></div>
+    <ul class="tasks" id="diag-tasks" aria-label="Tasks on the board"></ul>
+    <details class="raw"><summary>Raw messages from the board</summary><pre id="esp-log">(waiting)</pre></details>
   </section>
 
   <section class="reads" aria-label="Measurements">
@@ -605,11 +653,15 @@ function updateChips(){
   });
 }
 
-/* ---------- ESP32 link (Web Serial) ---------- */
+/* ---------- ESP32 link: USB (Web Serial) or WiFi (MQTT over WebSocket) ---------- */
 /* Frame: A5 5A TYPE LEN PAYLOAD CRC8(poly 0x07 over TYPE,LEN,PAYLOAD).
-   TYPE 1 = int16 samples (0.001 mV per count, 250 Hz), TYPE 2 = age,height,weight (float32) + diagnosis index. */
-var link = { on:false, port:null, writer:null, reader:null, sent:null, pending:0, cfgAt:0 };
-var espEls = { btn:$('esp-connect'), status:$('esp-status'), line:$('esp-line'), cls:$('esp-cls'), conf:$('esp-conf'), match:$('esp-match') };
+   TYPE 1 = int16 samples (0.001 mV per count, 250 Hz), TYPE 2 = age,height,weight (float32) + diagnosis index.
+   The same frames travel over USB serial or as MQTT messages on  ecgmon/<code>/in ; the board answers on ecgmon/<code>/out. */
+var link = { on:false, kind:'serial', mode:'serial', port:null, writer:null, reader:null, client:null,
+             tIn:'', tOut:'', sent:null, lastReal:null, owed:0, mult:1, pending:0, cfgAt:0, lastMsg:0, silent:false };
+var espEls = { btn:$('esp-connect'), mqBtn:$('mq-connect'), status:$('esp-status'), line:$('esp-line'),
+               cls:$('esp-cls'), conf:$('esp-conf'), match:$('esp-match') };
+var diagEls = { box:$('diag'), cards:$('diag-cards'), tasks:$('diag-tasks'), log:$('esp-log'), age:$('diag-age') };
 function crc8(bytes){
   var c = 0;
   for (var i=0;i<bytes.length;i++){
@@ -626,10 +678,15 @@ function pack(type,payload){
 }
 function dxIndex(){ for (var i=0;i<DX.length;i++) if (DX[i].id===state.dx) return i; return 255; }
 function espSay(msg, bad){ espEls.status.textContent = msg; espEls.status.className = 'hint' + (bad ? ' warn' : ''); }
+
 function send(buf){
   link.pending++;
-  link.writer.write(buf).catch(function(){ espDrop('Lost the connection to the board.'); })
-                        .then(function(){ link.pending--; });
+  var done = function(){ link.pending = Math.max(0, link.pending-1); };
+  if (link.kind === 'mqtt'){
+    try { link.client.publish(link.tIn, buf, { qos:0 }, done); } catch(e){ done(); }
+  } else {
+    link.writer.write(buf).catch(function(){ espDrop('Lost the connection to the board.', true); }).then(done);
+  }
 }
 function sendConfig(){
   var pl = new Uint8Array(13), dv = new DataView(pl.buffer);
@@ -638,34 +695,134 @@ function sendConfig(){
   send(pack(2, pl));
   link.cfgAt = performance.now();
 }
-/* called every animation frame: streams every sample the plot has drawn since last time */
+/* called every animation frame: streams the samples the plot has drawn since last time */
 function pump(){
   if (!link.on || paused || link.pending > 3) return;
-  var target = Math.floor(now/0.004);
-  if (link.sent === null) link.sent = target;
-  if (target - link.sent > 500) link.sent = target - 100;      // fell far behind (tab was throttled): skip ahead
-  var n = Math.min(target - link.sent, 100);
-  if (performance.now() - link.cfgAt > 2000) sendConfig();      // re-announce patient so a rebooted board catches up
+  var real = Math.floor(now/0.004), n;
+  if (link.lastReal === null){ link.lastReal = real; link.sent = real; link.owed = 0; return; }
+  if (performance.now() - link.cfgAt > 2000) sendConfig();      // re-announce the patient so a rebooted board catches up
+  if (link.mult === 1){
+    n = real - link.sent;                                        // exactly the samples already drawn on the plot
+    if (n > 500){ link.sent = real - 100; n = 100; }             // tab was throttled: skip ahead
+  } else {
+    link.owed = Math.min(link.owed + (real - link.lastReal) * link.mult, 600);
+    n = Math.floor(link.owed);
+  }
+  link.lastReal = real;
+  if (link.kind === 'mqtt' && n < 25) return;                    // WiFi: about one message per 100 ms
+  n = Math.min(n, 100);
   if (n <= 0) return;
+  ensure(Math.max(now, (link.sent + n) * 0.004) + 1.5);
   var pl = new Uint8Array(n*2), dv = new DataView(pl.buffer);
   for (var i=0;i<n;i++){
     var v = Math.round(signal((link.sent+1+i)*0.004)*1000);      // same signal() the canvas draws
     dv.setInt16(i*2, Math.max(-32768, Math.min(32767, v)), true);
   }
   link.sent += n;
+  if (link.mult !== 1) link.owed -= n;
   send(pack(1, pl));
 }
+
+/* ---- text coming back from the board ---- */
+var logLines = [];
+function logLine(s){ logLines.push(s); if (logLines.length > 25) logLines.shift(); diagEls.log.textContent = logLines.join('\n'); }
 function espHandleLine(line){
+  if (!line) return;
+  var kind = line.charAt(0);
+  if ((kind !== 'P' && kind !== 'S') || line.charAt(1) !== ',') return;
+  link.lastMsg = performance.now();
+  if (link.silent){ link.silent = false; espSay(link.kind === 'mqtt' ? 'Connected. The board is online.' : 'Streaming. The board is online.'); }
+  logLine(line);
   var p = line.split(',');
-  if (p[0] !== 'P' || p.length < 4) return;
-  var cls = parseInt(p[1],10), conf = parseInt(p[2],10), ms = parseInt(p[3],10), hr = parseInt(p[4]||'0',10);
+  if (kind === 'S'){ renderDiag(p); return; }
+  var cls = parseInt(p[1],10), conf = parseInt(p[2],10), ms = parseFloat(p[3]), hr = parseInt(p[4]||'0',10);
   if (!(cls >= 0 && cls < DX.length)) return;
   espEls.line.hidden = false;
   espEls.cls.textContent = DX[cls].name;
-  espEls.conf.textContent = conf + '% confidence \u00b7 ' + ms + ' ms on core 1' + (hr ? ' \u00b7 ' + hr + ' bpm' : '');
+  espEls.conf.textContent = conf + '% confidence \u00b7 ' + ms.toFixed(1) + ' ms on core 1' + (hr ? ' \u00b7 ' + hr + ' bpm' : '');
   var same = (cls === dxIndex());
   espEls.match.textContent = same ? 'Matches what is being sent' : 'Differs from what is being sent';
   espEls.match.className = same ? 'ok' : 'warn';
+}
+
+/* ---- diagnostics panel ---- */
+function lvl(bad,warn){ return bad ? 'bad' : (warn ? 'warn' : 'good'); }
+var CARDS = [
+ {id:'c0', label:'Core 0 load', f:function(m){ return m.cpu0<0 ? ['n/a','not measurable'] : [m.cpu0+'%','receiving, WiFi, display', lvl(m.cpu0>90,m.cpu0>70)]; }},
+ {id:'c1', label:'Core 1 load', f:function(m){ return m.cpu1<0 ? ['n/a','not measurable'] : [m.cpu1+'%','machine learning, statistics', lvl(m.cpu1>90,m.cpu1>70)]; }},
+ {id:'sps', label:'Samples received', f:function(m){ var want = 250*link.mult, off = Math.abs(m.sps-want)/want;
+        return [m.sps+' /s','expected '+want+' /s', m.sps===0 ? 'warn' : lvl(off>0.2,off>0.05)]; }},
+ {id:'fps', label:'Frames and errors', f:function(m){ return [m.fps+' /s','checksum errors '+m.crc+' \u00b7 bad frames '+m.bad, lvl(m.crc>50,m.crc>0||m.bad>0)]; }},
+ {id:'ml', label:'ML time per prediction', f:function(m){ var t=m.feat+m.net;
+        return [t.toFixed(1)+' ms','features '+m.feat.toFixed(1)+' ms \u00b7 network '+m.net.toFixed(1)+' ms', lvl(t>500,t>200)]; }},
+ {id:'mlmax', label:'ML worst case', f:function(m){ return [m.mlmax.toFixed(1)+' ms','budget 1000 ms \u00b7 missed '+m.miss+' \u00b7 longest gap '+m.mlper+' ms', lvl(m.miss>0,m.mlmax>500)]; }},
+ {id:'fill', label:'Analysis window', f:function(m){ return [m.fill+'%','needs 100% (6 s) to predict']; }},
+ {id:'heap', label:'Free memory', f:function(m){ return [m.heap+' KB','lowest so far '+m.heapmin+' KB', lvl(m.heapmin<30,m.heapmin<60)]; }},
+ {id:'mux', label:'Core 0 wait for core 1', f:function(m){ return [m.mux+' \u00b5s','worst time waiting for shared data', lvl(m.mux>5000,m.mux>1000)]; }},
+ {id:'disp', label:'Display', f:function(m){ return m.cols===0 && m.drop===0 ? ['not used','no display drawing'] :
+        [m.cols+' col/s','dropped '+m.drop+' bytes (expected 50 col/s)', lvl(m.drop>0,false)]; }},
+ {id:'wifi', label:'WiFi', f:function(m){ return m.wifi===0 && m.mq===0 && m.rec===0 ? ['not used','USB only'] :
+        [m.wifi+' dBm', m.mq+' msg/s \u00b7 WiFi drops '+m.wdrop+' \u00b7 broker connects '+m.rec, lvl(m.wifi<-85,m.wifi<-75||m.wdrop>0)]; }},
+ {id:'up', label:'Uptime', f:function(m){ var u=m.up; return [u<120 ? u+' s' : Math.floor(u/60)+' min','since the last reset']; }}
+];
+var TASKS = [
+ ['rxTask','core 0','reads the USB serial port and checks every frame','stk_rx'],
+ ['netTask','core 0','WiFi and MQTT: receives frames, sends results','stk_net'],
+ ['dispTask','core 0','draws the received signal on the display','stk_disp'],
+ ['mlTask','core 1','features and neural network, once per second','stk_ml'],
+ ['monTask','core 1','measures and reports these statistics','stk_mon']
+];
+var cardEls = {}, taskEls = {};
+(function buildDiag(){
+  CARDS.forEach(function(c){
+    var d = document.createElement('div'); d.className = 'read';
+    d.innerHTML = '<div class="k"></div><div class="v">\u2014</div><div class="s"></div>';
+    d.firstChild.textContent = c.label; diagEls.cards.appendChild(d); cardEls[c.id] = d;
+  });
+  TASKS.forEach(function(t){
+    var li = document.createElement('li');
+    li.innerHTML = '<span class="n"></span><span class="c"></span><span class="d"></span><span class="st"></span>';
+    li.children[0].textContent = t[0]; li.children[1].textContent = t[1]; li.children[2].textContent = t[2];
+    diagEls.tasks.appendChild(li); taskEls[t[3]] = li;
+  });
+})();
+function renderDiag(parts){
+  var m = {};
+  for (var i=1;i<parts.length;i++){ var kv = parts[i].split('='); if (kv.length===2) m[kv[0]] = parseFloat(kv[1]); }
+  var need = ['cpu0','cpu1','heap','heapmin','sps','fps','crc','bad','fill','feat','net','mlmax','mlper','miss','mux','drop','cols','wifi','mq','wdrop','rec','up'];
+  for (var j=0;j<need.length;j++) if (!isFinite(m[need[j]])) return;       // ignore a damaged line
+  diagEls.box.hidden = false;
+  CARDS.forEach(function(c){
+    var r = c.f(m), el = cardEls[c.id];
+    el.children[1].textContent = r[0]; el.children[1].className = 'v' + (r[2] ? ' '+r[2] : '');
+    el.children[2].textContent = r[1];
+  });
+  TASKS.forEach(function(t){
+    var v = m[t[3]], li = taskEls[t[3]];
+    if (!isFinite(v) || v < 0){ li.hidden = true; return; }
+    li.hidden = false;
+    var st = li.children[3];
+    st.textContent = (v/1024).toFixed(1) + ' KB stack free';
+    st.style.color = v<600 ? 'var(--danger)' : (v<1200 ? '#9A6700' : '');
+  });
+}
+
+/* ---- connection handling ---- */
+function setConnectedUi(on){
+  espEls.btn.textContent = on && link.kind==='serial' ? 'Disconnect' : 'Connect ESP32';
+  espEls.mqBtn.textContent = on && link.kind==='mqtt' ? 'Disconnect' : 'Connect WiFi';
+  document.querySelectorAll('#mode-seg button').forEach(function(b){ b.disabled = on; });
+}
+async function espDrop(msg, bad){
+  link.on = false;
+  try { if (link.reader) await link.reader.cancel(); } catch(e){}
+  try { if (link.writer) link.writer.releaseLock(); } catch(e){}
+  try { if (link.port) await link.port.close(); } catch(e){}
+  try { if (link.client) link.client.end(true); } catch(e){}
+  link.port = link.writer = link.reader = link.client = null; link.sent = null; link.lastReal = null; link.owed = 0; link.pending = 0; link.silent = false;
+  espEls.btn.disabled = false; espEls.mqBtn.disabled = false;
+  setConnectedUi(false); espEls.line.hidden = true; diagEls.box.hidden = true;
+  espSay(msg || 'Disconnected.', !!bad);
 }
 async function espReadLoop(port){
   var td = new TextDecoder(), buf = '', reader = port.readable.getReader();
@@ -681,43 +838,87 @@ async function espReadLoop(port){
     }
   } catch(e) { /* port closed */ }
 }
-async function espDrop(msg){
-  var was = link.on;
-  link.on = false;
-  try { if (link.reader) await link.reader.cancel(); } catch(e){}
-  try { if (link.writer) link.writer.releaseLock(); } catch(e){}
-  try { if (link.port) await link.port.close(); } catch(e){}
-  link.port = link.writer = link.reader = null; link.sent = null; link.pending = 0;
-  espEls.btn.textContent = 'Connect ESP32'; espEls.line.hidden = true;
-  espSay(msg || 'Disconnected.', was && !!msg);
-}
 async function espConnect(){
   if (!('serial' in navigator)){
-    espSay('This browser cannot open serial ports. Use Chrome or Edge on a computer, and open this page from a file or an https address.', true);
+    espSay('This browser cannot open serial ports. Use Chrome or Edge on a computer, or switch to WiFi.', true);
     return;
   }
   try {
     var port = await navigator.serial.requestPort();
     await port.open({ baudRate: 115200 });
     try { await port.setSignals({ dataTerminalReady:false, requestToSend:false }); } catch(e){}
-    link.port = port; link.writer = port.writable.getWriter();
+    link.kind = 'serial'; link.port = port; link.writer = port.writable.getWriter();
     espEls.btn.disabled = true;
     espSay('Connected. Waiting for the board to finish booting \u2026');
     await new Promise(function(res){ setTimeout(res, 1800); });
-    link.on = true; link.sent = null; link.pending = 0;
-    espEls.btn.disabled = false; espEls.btn.textContent = 'Disconnect';
+    link.on = true; link.sent = null; link.lastReal = null; link.owed = 0; link.pending = 0; link.lastMsg = performance.now(); link.silent = false;
+    espEls.btn.disabled = false; setConnectedUi(true);
     sendConfig();
     espSay('Streaming 250 samples per second. The board needs about 6 seconds of signal before it shows a prediction.');
     espReadLoop(port);
   } catch(e) {
     espEls.btn.disabled = false;
-    await espDrop(e && e.name === 'NotFoundError' ? 'No port selected.' : 'Could not open the port: ' + (e && e.message ? e.message : e) + '. Close the Arduino serial monitor and try again.');
+    await espDrop(e && e.name === 'NotFoundError' ? 'No port selected.' : 'Could not open the port: ' + (e && e.message ? e.message : e) + '. Close the Arduino serial monitor and try again.', !(e && e.name === 'NotFoundError'));
   }
 }
+function mqttConnect(){
+  if (typeof mqtt === 'undefined'){ espSay('The MQTT library did not load. Check your internet connection and reload the page.', true); return; }
+  var url = $('mq-url').value.trim(), code = $('mq-code').value.trim();
+  if (!/^wss?:\/\//.test(url)){ espSay('The broker address must start with wss:// (or ws://).', true); return; }
+  if (!/^[A-Za-z0-9_-]{6,48}$/.test(code)){ espSay('Use a secret code of 6 to 48 letters, digits, - or _, and put the same code in the sketch.', true); return; }
+  try { localStorage.setItem('ecg-mq-url', url); localStorage.setItem('ecg-mq-code', code); } catch(e){}
+  link.kind = 'mqtt'; link.tIn = 'ecgmon/'+code+'/in'; link.tOut = 'ecgmon/'+code+'/out';
+  espEls.mqBtn.disabled = true; espSay('Connecting to the broker \u2026');
+  var c;
+  try { c = mqtt.connect(url, { clientId:'ecgweb-'+Math.random().toString(16).slice(2,10), reconnectPeriod:2000, connectTimeout:10000, clean:true }); }
+  catch(e){ espEls.mqBtn.disabled = false; espSay('Could not start the connection: '+e.message, true); return; }
+  link.client = c;
+  c.on('connect', function(){
+    c.subscribe(link.tOut, { qos:0 }, function(err){
+      if (err){ espSay('Could not subscribe: '+err.message, true); return; }
+      link.on = true; link.sent = null; link.lastReal = null; link.owed = 0; link.pending = 0; link.lastMsg = performance.now(); link.silent = false;
+      espEls.mqBtn.disabled = false; setConnectedUi(true); sendConfig();
+      espSay('Connected to the broker. Waiting for the board to answer \u2026');
+    });
+  });
+  var td = new TextDecoder();
+  c.on('message', function(t, payload){ td.decode(payload).split(/\r?\n/).forEach(function(l){ espHandleLine(l.trim()); }); });
+  c.on('close', function(){ if (link.client === c && link.on){ link.on = false; espSay('Lost the broker connection. Reconnecting \u2026', true); } });
+  c.on('error', function(e){ if (link.client === c) espSay('Broker error: ' + (e && e.message ? e.message : e), true); });
+}
 espEls.btn.addEventListener('click', function(){ if (link.on) espDrop('Disconnected.'); else espConnect(); });
-if ('serial' in navigator) navigator.serial.addEventListener('disconnect', function(){ if (link.on) espDrop('The board was unplugged.'); });
+espEls.mqBtn.addEventListener('click', function(){ if (link.client) espDrop('Disconnected.'); else mqttConnect(); });
+document.querySelectorAll('#mode-seg button').forEach(function(b){
+  b.addEventListener('click', function(){
+    if (link.on || link.client) return;
+    link.mode = b.getAttribute('data-mode');
+    document.querySelectorAll('#mode-seg button').forEach(function(o){ o.setAttribute('aria-pressed', o===b ? 'true':'false'); });
+    $('mode-serial').hidden = link.mode !== 'serial'; $('mode-mqtt').hidden = link.mode !== 'mqtt';
+  });
+});
+$('mult').addEventListener('change', function(){
+  link.mult = Number(this.value); link.owed = 0;
+  $('mult-note').hidden = link.mult === 1;
+});
+try {
+  var su = localStorage.getItem('ecg-mq-url'), sc = localStorage.getItem('ecg-mq-code');
+  if (su) $('mq-url').value = su; if (sc) $('mq-code').value = sc;
+} catch(e){}
+if ('serial' in navigator) navigator.serial.addEventListener('disconnect', function(){ if (link.on && link.kind==='serial') espDrop('The board was unplugged.', true); });
+/* warn when the board stops reporting */
+setInterval(function(){
+  if (!link.on) return;
+  var age = (performance.now() - link.lastMsg) / 1000;
+  diagEls.age.textContent = link.lastMsg ? 'Last report ' + (age < 1.5 ? 'just now' : Math.round(age) + ' s ago') + '.' : 'Waiting for the first report.';
+  if (age > 5 && !link.silent){
+    link.silent = true;
+    espSay(link.kind === 'mqtt'
+      ? 'No reply from the board for ' + Math.round(age) + ' s. Check that it is powered, joined the WiFi, and uses the same secret code and broker.'
+      : 'No reply from the board for ' + Math.round(age) + ' s. Check that the current sketch is uploaded and the baud rate is 115200.', true);
+  }
+}, 1000);
 
-/* ---------- loop ---------- */
+/* ---------- loop ---------- *//* ---------- loop ---------- */
 var last = performance.now(), lastRead = 0;
 function frame(ts){
   var dt = Math.min(0.1,(ts-last)/1000); last = ts;
