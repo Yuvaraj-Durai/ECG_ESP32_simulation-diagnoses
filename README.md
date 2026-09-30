@@ -114,3 +114,76 @@ To feed your own ECG (e.g. an AD8232 on an ADC pin) into the same pipeline, send
 * Tested here on a PC: firmware parsing, decimation, feature extraction, network and a syntax/type check of the sketch against stub headers. It has **not been run on real ESP32 + TFT hardware**, so pins, SPI speed and timings may need small adjustments. The inference time printed on screen is the real measurement.
 * The network was trained only on this simulator's signals. The ~100 % accuracy shown is on synthetic data and says nothing about real patients; real ECGs have far more variability. Educational / prototyping use only, not a medical device.
 * Single lead (lead II). Real diagnosis such as STEMI or bundle branch block needs 12 leads.
+
+## 9. Version 2: no display needed, WiFi input, live diagnostics
+
+### Three ways to run it
+| Option | How the signal reaches the board | Where you read the results |
+|---|---|---|
+| **1. USB + web page** | USB cable, page opened in Chrome/Edge | prediction and diagnostics panel on the page |
+| **2. WiFi (MQTT) from anywhere** | internet broker, any browser, no cable | same panel, but the board only needs power + WiFi |
+| **3. Standalone check** | either of the above | Arduino Serial Monitor (115200) text lines and the blinking LED on GPIO 2 |
+
+### No display yet
+Leave `#define USE_DISPLAY 0` in the sketch. Everything else works, and the onboard LED blinks once per second while a signal arrives. Set it to `1` after you wire the TFT.
+
+### WiFi (MQTT) setup
+1. Install the **PubSubClient** library (Nick O'Leary).
+2. In the sketch set `USE_WIFI 1`, `WIFI_SSID`, `WIFI_PASS` (2.4 GHz WiFi only) and a long secret `ECG_CODE` of your own.
+3. Upload. In the web page choose **WiFi**, type the same code, press **Connect WiFi**.
+The page and board meet on a public test broker (`broker.hivemq.com`) under the topic `ecgmon/<code>/in` (signal to the board) and `ecgmon/<code>/out` (results back). Anyone who knows or guesses your code can read or send data to it, so use a long random code and only synthetic signals. **Never commit your WiFi password or code to a public GitHub repository**: keep the placeholder values in the copy you publish.
+
+### Diagnostics the board reports every second
+`S,key=value,...` lines, shown as cards on the page and readable in the Serial Monitor:
+core 0 / core 1 CPU load, samples per second received (expect 250), frames per second, checksum errors, ML time (features and network separately), worst ML time and missed deadlines, analysis-window fill, free and lowest free memory, core-0 wait for shared data, display columns per second and dropped bytes, WiFi signal and reconnects, uptime, and the free stack of every task.
+The **Send rate** control (1x, 2x, 5x) is a stress test: it sends samples faster than real time, so predictions become wrong, but you can watch CPU load, errors and timing climb.
+If the board stops reporting for 5 seconds the page warns you.
+
+### Verified on a PC, not on hardware
+The firmware receive path, CRC handling, MQTT path (through a local broker), ML cycle and report line were run on a PC with stub Arduino headers: 110 of 110 streams classified correctly, corrupted data rejected by the checksum, the page sent about 250 samples per second at 1x and about 1250 at 5x. The CPU-load meter (`esp_register_freertos_idle_hook_for_cpu`) and the real WiFi/MQTT library calls have **not** been run on an ESP32. If the sketch fails to compile because of the CPU meter, set `USE_CPU_METER 0`.
+
+---
+
+## v2: three ways to run it, plus live diagnostics
+
+Edit the switches at the top of `esp32_ecg_monitor.ino`, upload, done.
+
+| Setup | `USE_DISPLAY` | `USE_WIFI` | Where you see results |
+|---|---|---|---|
+| **1. USB, no display (default)** | 0 | 0 | Web page (prediction + diagnostics), onboard LED on GPIO 2 (blinks 1x/s while a signal arrives), Serial Monitor |
+| **2. USB + TFT display** | 1 | 0 | Display + web page. Needs the wiring table above and the *Adafruit GFX* and *Adafruit ILI9341* libraries |
+| **3. WiFi (no cable to the PC)** | 0 or 1 | 1 | Web page in the **WiFi** tab (any browser, any computer). Needs the *PubSubClient* library. Fill in `WIFI_SSID`, `WIFI_PASS`, `ECG_CODE` |
+
+WiFi mode: the page and the board both talk to an MQTT broker (default `broker.hivemq.com`, a public test broker). Topics are `ecgmon/<code>/in` (page to board) and `ecgmon/<code>/out` (board to page). Use a long random `ECG_CODE` and type the same code into the page. Anyone who knows the code could read or inject data, and the broker is a third-party service that can change or go down, so for anything private run your own broker. The board needs 2.4 GHz WiFi.
+
+### Diagnostics ("stress") report
+Every second the board sends `S,key=value,...`. The page turns it into cards that go green, amber or red: CPU load of core 0 and core 1, samples per second, frame and checksum errors, ML time (features and network separately, worst case, missed deadlines), free and lowest-ever memory, time core 0 waits for core 1, display drops, WiFi signal and reconnects, uptime, and the free stack of every task.
+The **Send rate** box (1x, 2x, 5x) pushes the signal faster than real time to load the board. Predictions are meaningless then; watch the cards instead.
+The raw lines are in "Raw messages from the board", and also in the Arduino Serial Monitor if the page is not connected.
+
+### Notes on the CPU-load meter
+It counts how often each core's idle task runs and compares with a 0.4 s idle-only calibration at boot. It needs the `esp_register_freertos_idle_hook_for_cpu` API, present in Arduino-ESP32 2.x and 3.x; if your core lacks it the cards show "n/a" and everything else still works.
+
+---
+
+## v3: the ESP32's own WiFi network (no internet, no router)
+
+Set in `esp32_ecg_monitor.ino`:
+```cpp
+#define USE_AP       1          // the board creates its own WiFi network and serves the web page itself
+#define USE_WIFI     0          // must be 0 (you cannot use both)
+#define AP_SSID      "ECG-Monitor"
+#define AP_PASS      "ecg12345"  // at least 8 characters
+```
+The sketch folder must contain: `esp32_ecg_monitor.ino`, `ecg_ml.h`, `model_weights.h` and **`page_html.h`** (the web page stored in flash).
+
+1. Upload. The Serial Monitor (115200) prints `# AP: started - WiFi name "ECG-Monitor", password "ecg12345" -> open http://192.168.4.1/ in a browser`.
+2. On a laptop or phone, join the WiFi network **ECG-Monitor**. (Phones: turn off mobile data. If the device says "no internet", choose to stay connected.)
+3. In the browser type **http://192.168.4.1** (include `http://`). The page is served by the board and selects the *ESP32's own WiFi* mode by itself.
+4. Press **Connect to this ESP32**, choose a diagnosis and patient.
+
+How it works: the page POSTs the samples as hex text to `/rx` about ten times per second, and polls `/out?since=N` once per second for the newest `P` and `S` lines. Up to 3 devices can join at once. The GitHub copy of the page cannot use this mode (a page from the internet cannot reach the board), it explains that when you click it.
+
+If you change `web/ecg-simulator-esp32.html`, run `python python/make_page_header.py` to rebuild `page_html.h`. It strips the internet-only parts (Google Fonts and the MQTT library) because a device on the board's own WiFi has no internet, and the browser would wait for them before showing the page.
+
+If Arduino reports the sketch is too big, choose Tools, Partition Scheme, **Huge APP (3MB No OTA)**.
