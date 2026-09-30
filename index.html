@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ECG simulator + ESP32 link</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#F3F5F7; --panel:#FFFFFF; --text:#12181F; --muted:#5B6673; --line:#D8DEE4;
+  --accent:#0B6E99; --accent-ink:#FFFFFF; --danger:#B3261E; --tint:#E9F1F5;
+  --paper:#FFF3F0; --grid-s:#F5D3CF; --grid-l:#E8A29C; --ink:#10161D;
+  box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px);
+  padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0F1418; --panel:#171E24; --text:#E7ECF0; --muted:#93A1AE; --line:#2A343D;
+    --accent:#4FB3D9; --accent-ink:#0B1116; --danger:#FF8A80; --tint:#1D2830;
+    --paper:#1B1517; --grid-s:#352327; --grid-l:#5A3439; --ink:#F3E9E6;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0F1418; --panel:#171E24; --text:#E7ECF0; --muted:#93A1AE; --line:#2A343D;
+  --accent:#4FB3D9; --accent-ink:#0B1116; --danger:#FF8A80; --tint:#1D2830;
+  --paper:#1B1517; --grid-s:#352327; --grid-l:#5A3439; --ink:#F3E9E6;
+}
+*,*::before,*::after{box-sizing:inherit}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{
+  margin:0; background:var(--bg); color:var(--text);
+  font-family:"Schibsted Grotesk",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  font-size:15px; line-height:1.5; -webkit-text-size-adjust:100%;
+}
+.wrap{max-width:1180px; margin:0 auto; padding:20px 16px 40px}
+h1{font-size:24px; line-height:1.2; margin:0 0 4px; font-weight:700; letter-spacing:-0.01em}
+.sub{margin:0 0 18px; color:var(--muted); max-width:62ch}
+h2{font-size:16px; margin:0 0 10px; font-weight:600}
+button,select,input{font:inherit; color:inherit}
+:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+
+.bar{display:flex; flex-wrap:wrap; gap:14px 18px; align-items:flex-end; margin-bottom:14px}
+.field{display:flex; flex-direction:column; gap:5px}
+.field.grow{flex:1 1 280px}
+.lbl,label{font-size:13px; color:var(--muted); font-weight:500}
+select{
+  appearance:none; -webkit-appearance:none; width:100%; padding:10px 38px 10px 12px;
+  background:var(--panel) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%237b8794' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 14px center;
+  border:1px solid var(--line); border-radius:8px; font-weight:600; font-size:16px; cursor:pointer;
+}
+.seg{display:inline-flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; background:var(--panel)}
+.seg button{border:0; background:transparent; padding:10px 13px; cursor:pointer; font-size:14px; min-height:42px}
+.seg button + button{border-left:1px solid var(--line)}
+.seg button[aria-pressed="true"]{background:var(--accent); color:var(--accent-ink); font-weight:600}
+.btn{
+  border:1px solid var(--line); background:var(--panel); border-radius:8px; padding:10px 16px;
+  cursor:pointer; font-weight:600; min-height:42px;
+}
+.btn:hover{border-color:var(--accent)}
+.check{display:flex; align-items:center; gap:8px; min-height:42px; cursor:pointer; color:var(--text); font-size:14px}
+.check input{width:18px; height:18px; accent-color:var(--accent)}
+
+.strip{position:relative; border:1px solid var(--line); border-radius:14px; overflow:hidden; background:var(--paper)}
+canvas{display:block; width:100%; height:300px}
+
+.reads{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin:14px 0}
+.read{background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px}
+.read .k{font-size:13px; color:var(--muted); font-weight:500}
+.read .v{font-size:28px; line-height:1.15; font-weight:700; font-variant-numeric:tabular-nums; margin-top:2px}
+.read .v small{font-size:14px; font-weight:500; color:var(--muted); margin-left:4px}
+.read .s{font-size:12.5px; color:var(--muted); min-height:18px; margin-top:2px}
+
+.cols{display:grid; grid-template-columns:1.15fr 1fr; gap:14px}
+@media (max-width:820px){ .cols{grid-template-columns:1fr} canvas{height:250px} }
+.panel{background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px 18px}
+
+.inputs{display:grid; grid-template-columns:repeat(3,1fr); gap:12px}
+@media (max-width:480px){ .inputs{grid-template-columns:1fr 1fr 1fr; gap:8px} }
+.inputs input{
+  width:100%; padding:10px 10px; border:1px solid var(--line); border-radius:8px;
+  background:var(--bg); font-size:17px; font-weight:600; font-variant-numeric:tabular-nums;
+}
+.hint{font-size:12.5px; color:var(--muted); margin:6px 0 0}
+.chips{display:flex; flex-wrap:wrap; gap:8px; margin:14px 0 4px}
+.chip{
+  border:1px solid var(--line); background:var(--bg); border-radius:999px; padding:6px 13px;
+  font-size:13.5px; cursor:pointer; min-height:34px;
+}
+.chip:hover{border-color:var(--accent)}
+.chip[aria-pressed="true"]{background:var(--tint); border-color:var(--accent); font-weight:600}
+.linkbtn{border:0; background:none; color:var(--accent); padding:6px 0; cursor:pointer; font-weight:600; font-size:14px}
+.linkbtn:hover{text-decoration:underline}
+
+.effects{list-style:none; margin:14px 0 0; padding:0; border-top:1px solid var(--line)}
+.effects li{padding:9px 0; border-bottom:1px solid var(--line); display:grid; grid-template-columns:104px 1fr; gap:10px; font-size:14px}
+.effects b{font-weight:600}
+.effects span.a{color:var(--muted)}
+
+.dxname{font-size:19px; font-weight:700; margin:0 0 6px}
+.dxdesc{margin:0 0 10px; max-width:60ch}
+.feat{margin:0; padding-left:18px}
+.feat li{margin-bottom:5px}
+.warn{color:var(--danger); font-weight:600}
+.esp-head{display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap}
+.esp-head h2{margin:0}
+.esp-line{margin:10px 0 0; display:flex; flex-wrap:wrap; gap:6px 18px; align-items:baseline}
+.esp-line strong{font-size:19px}
+.ok{color:#1B7F3B; font-weight:600}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]) .ok{color:#6FD08C} }
+:root[data-theme="dark"] .ok{color:#6FD08C}
+.panel.esp{margin:14px 0}
+.note{margin:18px 0 0; font-size:13px; color:var(--muted); max-width:80ch}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <header>
+    <h1>ECG simulator</h1>
+    <p class="sub">A lead II strip for ten diagnoses. Enter a patient's age, height and weight and the rate, intervals and voltage adjust to match.</p>
+  </header>
+
+  <section class="bar" aria-label="Display controls">
+    <div class="field grow">
+      <label for="dx">Diagnosis</label>
+      <select id="dx"></select>
+    </div>
+    <div class="field">
+      <span class="lbl" id="l-speed">Paper speed</span>
+      <div class="seg" role="group" aria-labelledby="l-speed">
+        <button type="button" data-speed="25" aria-pressed="true">25 mm/s</button>
+        <button type="button" data-speed="50" aria-pressed="false">50 mm/s</button>
+      </div>
+    </div>
+    <div class="field">
+      <span class="lbl" id="l-gain">Gain</span>
+      <div class="seg" role="group" aria-labelledby="l-gain">
+        <button type="button" data-gain="10" aria-pressed="true">10 mm/mV</button>
+        <button type="button" data-gain="20" aria-pressed="false">20 mm/mV</button>
+      </div>
+    </div>
+    <label class="check"><input type="checkbox" id="noise" checked> Add drift and muscle noise</label>
+    <button type="button" class="btn" id="pause">Pause</button>
+  </section>
+
+  <div class="strip">
+    <canvas id="ecg" role="img" aria-label="Simulated lead II electrocardiogram"></canvas>
+  </div>
+
+  <section class="panel esp" aria-labelledby="h-esp">
+    <div class="esp-head">
+      <h2 id="h-esp">ESP32 link</h2>
+      <button type="button" class="btn" id="esp-connect">Connect ESP32</button>
+    </div>
+    <p class="hint" id="esp-status">Not connected. Sends this exact trace, plus the patient's age, height and weight, to the board over USB serial (115200 baud). Needs Chrome or Edge on a computer.</p>
+    <div class="esp-line" id="esp-line" hidden>
+      <span>ESP32 predicts <strong id="esp-cls">—</strong></span>
+      <span id="esp-conf"></span>
+      <span id="esp-match"></span>
+    </div>
+  </section>
+
+  <section class="reads" aria-label="Measurements">
+    <div class="read"><div class="k">Heart rate</div><div class="v"><span id="r-hr">—</span><small>bpm</small></div><div class="s" id="s-hr"></div></div>
+    <div class="read"><div class="k">PR interval</div><div class="v"><span id="r-pr">—</span><small id="u-pr">ms</small></div><div class="s" id="s-pr"></div></div>
+    <div class="read"><div class="k">QRS duration</div><div class="v"><span id="r-qrs">—</span><small id="u-qrs">ms</small></div><div class="s" id="s-qrs"></div></div>
+    <div class="read"><div class="k">QT interval</div><div class="v"><span id="r-qt">—</span><small id="u-qt">ms</small></div><div class="s" id="s-qt"></div></div>
+    <div class="read"><div class="k">Rhythm</div><div class="v" style="font-size:22px;padding-top:5px"><span id="r-rh">—</span></div><div class="s" id="s-rh"></div></div>
+  </section>
+
+  <div class="cols">
+    <section class="panel" aria-labelledby="h-patient">
+      <h2 id="h-patient">Patient</h2>
+      <div class="inputs">
+        <div class="field"><label for="age">Age (years)</label><input id="age" type="number" inputmode="decimal" min="0" max="100" step="0.1" value="35"></div>
+        <div class="field"><label for="ht">Height (cm)</label><input id="ht" type="number" inputmode="decimal" min="40" max="230" step="1" value="172"></div>
+        <div class="field"><label for="wt">Weight (kg)</label><input id="wt" type="number" inputmode="decimal" min="2" max="250" step="0.5" value="70"></div>
+      </div>
+      <p class="hint" id="agehint">Use decimals for babies: 0.5 is six months.</p>
+      <div class="chips" id="chips" role="group" aria-label="Quick patients"></div>
+      <button type="button" class="linkbtn" id="typical">Fill typical height and weight for this age</button>
+
+      <ul class="effects" id="effects" aria-label="How this patient changes the trace"></ul>
+    </section>
+
+    <section class="panel" aria-labelledby="dxname">
+      <h2>What to look for</h2>
+      <p class="dxname" id="dxname"></p>
+      <p class="dxdesc" id="dxdesc"></p>
+      <ul class="feat" id="dxfeat"></ul>
+    </section>
+  </div>
+
+  <p class="note">Simulated waveforms for teaching and software testing. Values are generalised from published paediatric and adult norms and are not a medical device; do not use them to diagnose or treat anyone.</p>
+</main>
+
+<script>
+(function(){
+'use strict';
+
+/* ---------- helpers ---------- */
+var $ = function(id){ return document.getElementById(id); };
+var clamp = function(x,a,b){ return Math.min(b, Math.max(a, x)); };
+var TAU = Math.PI * 2;
+function lerpT(tab, x){
+  if (x <= tab[0][0]) return tab[0][1];
+  for (var i = 1; i < tab.length; i++){
+    if (x <= tab[i][0]){
+      var a = tab[i-1], b = tab[i];
+      return a[1] + (b[1]-a[1]) * (x-a[0]) / (b[0]-a[0]);
+    }
+  }
+  return tab[tab.length-1][1];
+}
+function g(x,c,s,a){ var z=(x-c)/s; if (z>6||z<-6) return 0; return a*Math.exp(-0.5*z*z); }
+function sig(x){ return 1/(1+Math.exp(-x)); }
+function mulberry32(a){ return function(){ a|=0; a=a+0x6D2B79F5|0; var t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
+function gauss(r){ var u=0,v=0; while(u===0)u=r(); v=r(); return Math.sqrt(-2*Math.log(u))*Math.cos(TAU*v); }
+
+/* ---------- age tables ---------- */
+var HR_T  = [[0.03,145],[0.5,130],[1,120],[3,105],[5,98],[8,88],[12,80],[16,74],[30,72],[65,70],[100,66]];
+var PR_T  = [[0,0.10],[1,0.11],[3,0.12],[8,0.13],[12,0.14],[16,0.15],[25,0.16],[80,0.17],[100,0.18]];
+var QRS_T = [[0,0.06],[1,0.065],[5,0.07],[12,0.08],[16,0.085],[25,0.09],[80,0.095],[100,0.10]];
+var H_T   = [[0,50],[1,75],[2,87],[5,108],[8,128],[10,138],[12,149],[14,163],[16,170],[18,172],[25,172],[80,168],[100,165]];
+var W_T   = [[0,3.4],[1,9.5],[2,12],[5,18],[8,26],[10,32],[12,42],[14,52],[16,60],[18,66],[25,70],[80,70],[100,68]];
+var AMP_T = [[0,1.35],[2,1.35],[6,1.28],[12,1.15],[18,1.05],[30,1.0],[60,0.92],[100,0.8]];
+var FLUT_T= [[0,6.7],[1,6.0],[12,5.4],[16,5.0]];
+
+function typicalFor(age){
+  return { h: Math.round(lerpT(H_T,age)), w: Math.round(lerpT(W_T,age)*10)/10 };
+}
+function ageText(a){
+  if (a < 1/12) return Math.max(1,Math.round(a*365)) + ' days old';
+  if (a < 2) return Math.round(a*12) + ' months old';
+  return (Math.round(a*10)/10) + ' years old';
+}
+
+/* ---------- patient model ---------- */
+function patientModel(age,h,w){
+  var t = typicalFor(age);
+  var bmi = w/Math.pow(h/100,2), bmiExp = t.w/Math.pow(t.h/100,2);
+  var bsa = Math.sqrt(h*w/3600), bsaExp = Math.sqrt(t.h*t.w/3600);
+  var size = clamp(bsa/bsaExp, 0.7, 1.4);
+  var ratio = bmi/bmiExp;
+  var ampAge = lerpT(AMP_T,age);
+  var ampBmi = clamp(1 - 0.35*(ratio-1), 0.6, 1.3);
+  var amp = clamp(ampAge*ampBmi, 0.5, 2.0);
+  return {
+    age:age, h:h, w:w, bmi:bmi, bmiExp:bmiExp, bsa:bsa, bsaExp:bsaExp, ratio:ratio, size:size,
+    hrN: lerpT(HR_T,age),
+    prN: lerpT(PR_T,age),
+    qrsN: lerpT(QRS_T,age),
+    qrs: lerpT(QRS_T,age)*(1+0.15*(size-1)),
+    amp: amp, ampAge: ampAge, ampBmi: ampBmi,
+    rsa: age<18 ? 0.06 : (age<65 ? 0.035 : 0.018),
+    qtc: 0.40 + (age<0.5 ? 0.02 : 0)
+  };
+}
+
+/* ---------- diagnoses ---------- */
+var DX = [
+  {id:'nsr', name:'Normal sinus rhythm',
+   desc:'Each beat starts in the sinus node, giving a P wave, a narrow QRS complex and an upright T wave. Rate and intervals sit inside the range for the patient\u2019s age.',
+   feat:['A P wave comes before every QRS','PR and QRS match the age norms','Regular rhythm; the rate drifts slightly with breathing']},
+  {id:'brady', name:'Sinus bradycardia',
+   desc:'Normal sinus waveform, but the rate is below the usual range for the patient\u2019s age.',
+   feat:['Same shape as normal sinus rhythm','Long, flat stretch between T wave and the next P wave','Rate well under the age range']},
+  {id:'tachy', name:'Sinus tachycardia',
+   desc:'Normal sinus waveform at a rate above the usual range for age, for example with fever, pain, anxiety or exercise.',
+   feat:['A P wave still precedes each QRS','Short RR interval; T wave and next P wave sit close together','Regular rhythm at a fast rate']},
+  {id:'afib', name:'Atrial fibrillation',
+   desc:'The atria quiver instead of contracting, and the AV node lets impulses through at random.',
+   feat:['No clear P waves; a fine, uneven baseline instead','RR intervals are irregularly irregular','QRS complexes stay narrow']},
+  {id:'flutter', name:'Atrial flutter',
+   desc:'A fast, regular circuit in the atria produces sawtooth waves. The AV node passes every second, third or fourth one, depending on age.',
+   feat:['Sawtooth flutter waves with no flat baseline','Regular ventricular rate set by the block ratio (2:1, 3:1 or 4:1)','Atrial rate is faster in children']},
+  {id:'avb1', name:'First-degree AV block',
+   desc:'Every atrial impulse reaches the ventricles, but conduction through the AV node is slow.',
+   feat:['PR interval longer than the age norm','Every P wave is followed by a QRS','Rhythm is regular; QRS stays narrow']},
+  {id:'lbbb', name:'Left bundle branch block',
+   desc:'The left ventricle is activated late through slow muscle conduction, which widens the QRS and changes repolarisation.',
+   feat:['Wide QRS with a broad, notched R wave','ST depression and an inverted T wave (opposite to the QRS)','P wave and PR interval unchanged']},
+  {id:'stemi', name:'ST-elevation myocardial infarction',
+   desc:'Acute blockage of a coronary artery. This lead II trace shows the inferior-wall pattern; other leads would show mirror-image changes.',
+   feat:['ST segment lifted and convex ("tombstone" shape)','Tall T wave and a deep Q wave','Rate slightly raised']},
+  {id:'vt', name:'Ventricular tachycardia',
+   desc:'A fast rhythm that starts in the ventricles. It can be life-threatening and is treated as an emergency when the patient is unstable.',
+   feat:['Wide, regular complexes at a very fast rate','No visible P waves','QRS and T wave blend into one wave']},
+  {id:'vf', name:'Ventricular fibrillation',
+   desc:'Chaotic electrical activity in the ventricles. The heart cannot pump, so this is a cardiac arrest rhythm that needs immediate defibrillation.',
+   feat:['No QRS complexes or P waves','Irregular waves that change in size and speed','No measurable rate or intervals']}
+];
+var DXBY = {}; DX.forEach(function(d){ DXBY[d.id]=d; });
+
+function makeProfile(id,P){
+  var age = P.age;
+  var pf = {
+    id:id, mode:'regular', hr:P.hrN, pr:P.prN, qrs:P.qrs, hasP:true,
+    pDur: age<12 ? 0.07 : 0.09, pAmp: 0.13*Math.sqrt(P.amp),
+    rAmp:P.amp, qAmp:-0.09, sAmp:-0.14, tAmp:0.28*P.amp, stAmp:0, notch:false,
+    qtc:P.qtc, rsa:P.rsa, fAmp:0, flutHz:0, block:0
+  };
+  switch(id){
+    case 'brady': pf.hr = P.hrN*0.62; break;
+    case 'tachy': pf.hr = Math.min(P.hrN*1.65, 215); break;
+    case 'afib':  pf.mode='afib'; pf.hasP=false; pf.hr=Math.min(P.hrN*1.5,200); pf.fAmp=0.05*Math.sqrt(P.amp); break;
+    case 'flutter':
+      pf.mode='flutter'; pf.hasP=false;
+      pf.flutHz = lerpT(FLUT_T,age);
+      pf.block = age<1 ? 2 : (age<12 ? 3 : 4);
+      pf.hr = 60*pf.flutHz/pf.block;
+      pf.fAmp = 0.11*Math.sqrt(P.amp);
+      break;
+    case 'avb1':  pf.pr = Math.min(P.prN+0.14, 0.42); break;
+    case 'lbbb':
+      pf.qrs = Math.max(P.qrs+0.055, 0.125); pf.notch=true; pf.qAmp=0; pf.sAmp=0;
+      pf.rAmp = P.amp*0.9; pf.tAmp = -0.3*P.amp; pf.stAmp = -0.12*P.amp; break;
+    case 'stemi':
+      pf.hr = P.hrN*1.15; pf.stAmp = 0.4*P.amp; pf.tAmp = 0.5*P.amp; pf.qAmp=-0.3; pf.sAmp=-0.03; break;
+    case 'vt':    pf.mode='vt'; pf.hasP=false; pf.hr=clamp(P.hrN*2.3,150,240); pf.rAmp=1.1*P.amp; break;
+    case 'vf':    pf.mode='vf'; pf.hasP=false; pf.rAmp=0.7*P.amp; break;
+  }
+  return pf;
+}
+
+/* ---------- state ---------- */
+var state = { dx:'nsr', age:35, h:172, w:70, speed:25, gain:10, noise:true };
+var P = patientModel(state.age,state.h,state.w);
+var pf = makeProfile(state.dx,P);
+var beats = [], rng = mulberry32(7), nextT = 0, prevRR = 1;
+var now = 20, paused = false, dirty = true;
+
+/* ---------- beat scheduling ---------- */
+function nextRR(t){
+  var base = 60/pf.hr;
+  switch(pf.mode){
+    case 'afib':    return Math.max(0.28, base*(0.55+0.9*rng()));
+    case 'flutter': return pf.block/pf.flutHz;
+    case 'vt':      return base*(1+0.01*gauss(rng));
+    default:
+      return base*(1 + pf.rsa*Math.sin(TAU*0.28*t) + 0.008*gauss(rng));
+  }
+}
+function resetBeats(from){
+  rng = mulberry32(7); beats = []; pf.t0 = from; nextT = from;
+  prevRR = pf.mode==='flutter' ? pf.block/pf.flutHz : 60/pf.hr;
+  ensure(now+2);
+}
+function ensure(until){
+  if (pf.mode==='vf') return;
+  while (nextT < until){
+    var qt = clamp(pf.qtc*Math.sqrt(clamp(prevRR,0.25,1.6)), 0.18, 0.5);
+    beats.push({ t:nextT, rr:prevRR, qt:qt, k:1+0.03*gauss(rng), k2:1+0.05*gauss(rng) });
+    var rr = nextRR(nextT);
+    prevRR = rr; nextT += rr;
+  }
+}
+function prune(){ while (beats.length && beats[0].t < now-45) beats.shift(); }
+
+/* ---------- waveform ---------- */
+function beatValue(dt,b){
+  var q = pf.qrs, A = pf.rAmp*b.k;
+  if (pf.mode==='vt') return A*(g(dt,0,0.045,1) - 0.55*g(dt,0.12,0.06,1));
+  var v = 0, qOn = -0.4*q;
+  if (pf.hasP) v += g(dt, qOn-pf.pr+pf.pDur/2, pf.pDur/4.5, pf.pAmp*b.k);
+  if (pf.notch){
+    v += g(dt,-0.18*q,0.14*q,0.85*A) + g(dt,0.18*q,0.14*q,0.95*A);
+  } else {
+    v += g(dt,-0.32*q,0.11*q,pf.qAmp*A) + g(dt,0,0.13*q,A) + g(dt,0.30*q,0.12*q,pf.sAmp*A);
+  }
+  v += g(dt, qOn+0.72*b.qt, 0.11*b.qt, pf.tAmp*b.k2);
+  if (pf.stAmp) v += pf.stAmp*(sig((dt-0.6*q)/0.008) - sig((dt-(qOn+0.98*b.qt))/0.03));
+  return v;
+}
+function background(t){
+  var v = 0, m = pf.mode;
+  if (m==='afib'){
+    v += pf.fAmp*( Math.sin(TAU*5.1*t+0.3)*(0.7+0.3*Math.sin(TAU*0.31*t))
+                 + 0.8*Math.sin(TAU*6.3*t+1.7)*(0.7+0.3*Math.sin(TAU*0.23*t+1))
+                 + 0.6*Math.sin(TAU*7.7*t+4.0)*(0.7+0.3*Math.sin(TAU*0.41*t+2)) ) / 1.6;
+  } else if (m==='flutter'){
+    var ph = (t-pf.t0)*pf.flutHz, s = 0;
+    for (var k=1;k<=4;k++) s += Math.sin(TAU*k*ph)/k;
+    v += pf.fAmp*(2/Math.PI)*s;
+  } else if (m==='vf'){
+    var env = 0.6+0.4*Math.sin(TAU*0.29*t+0.5);
+    var s2 = Math.sin(TAU*4.1*t + 1.5*Math.sin(TAU*0.31*t))
+           + 0.8*Math.sin(TAU*5.6*t + 2.0*Math.sin(TAU*0.47*t+1))
+           + 0.6*Math.sin(TAU*3.3*t + 1.2*Math.sin(TAU*0.23*t+2))
+           + 0.4*Math.sin(TAU*7.2*t + 1.6*Math.sin(TAU*0.61*t+3));
+    v += pf.rAmp*env*s2/2.4;
+  }
+  if (state.noise){
+    v += 0.025*Math.sin(TAU*0.27*t) + 0.012*Math.sin(TAU*0.09*t+1.3);
+    v += 0.008*(Math.sin(TAU*43.7*t)+Math.sin(TAU*57.3*t+2.1)+Math.sin(TAU*29.1*t+0.7));
+  }
+  return v;
+}
+function signal(t){
+  var v = 0;
+  if (pf.mode!=='vf' && beats.length){
+    var lo = 0, hi = beats.length, lim = t-0.6;
+    while (lo<hi){ var mid=(lo+hi)>>1; if (beats[mid].t < lim) lo=mid+1; else hi=mid; }
+    for (var i=lo; i<beats.length && beats[i].t <= t+0.6; i++) v += beatValue(t-beats[i].t, beats[i]);
+  }
+  return v + background(t);
+}
+
+/* ---------- drawing ---------- */
+var cvs = $('ecg'), ctx = cvs.getContext('2d');
+var cw = 0, ch = 0, col = {}, frameN = 0;
+function readColors(){
+  var cs = getComputedStyle(document.documentElement);
+  ['paper','grid-s','grid-l','ink','muted'].forEach(function(k){ col[k] = cs.getPropertyValue('--'+k).trim(); });
+  dirty = true;
+}
+function resize(){
+  var r = cvs.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+  if (!r.width) return;
+  cw = r.width; ch = r.height;
+  cvs.width = Math.round(cw*d); cvs.height = Math.round(ch*d);
+  ctx.setTransform(d,0,0,d,0,0);
+  dirty = true;
+}
+function draw(){
+  if (!cw) return;
+  var mm = cw<520 ? 3.2 : 4;
+  var pxSec = mm*state.speed, span = cw/pxSec, t0 = now-span;
+  var base = ch*0.62, pxMV = state.gain*mm;
+  ctx.fillStyle = col.paper; ctx.fillRect(0,0,cw,ch);
+
+  // grid, locked to paper time so it scrolls with the trace
+  var k0 = Math.ceil(t0*state.speed), k1 = Math.floor(now*state.speed), k;
+  ctx.lineWidth = 1; ctx.strokeStyle = col['grid-s']; ctx.beginPath();
+  for (k=k0;k<=k1;k++){ if (k%5===0) continue; var x=(k/state.speed-t0)*pxSec; ctx.moveTo(x,0); ctx.lineTo(x,ch); }
+  var j0 = -Math.ceil(base/mm), j1 = Math.ceil((ch-base)/mm), j;
+  for (j=j0;j<=j1;j++){ if (j%5===0) continue; var y=base+j*mm; ctx.moveTo(0,y); ctx.lineTo(cw,y); }
+  ctx.stroke();
+  ctx.strokeStyle = col['grid-l']; ctx.beginPath();
+  for (k=k0;k<=k1;k++){ if (k%5!==0) continue; var x2=(k/state.speed-t0)*pxSec; ctx.moveTo(x2,0); ctx.lineTo(x2,ch); }
+  for (j=j0;j<=j1;j++){ if (j%5!==0) continue; var y2=base+j*mm; ctx.moveTo(0,y2); ctx.lineTo(cw,y2); }
+  ctx.stroke();
+
+  // trace
+  var dt = 0.004, i0 = Math.ceil(t0/dt), i1 = Math.floor(now/dt);
+  ctx.strokeStyle = col.ink; ctx.lineWidth = 1.7; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.beginPath();
+  var lx=0, ly=0;
+  for (var i=i0;i<=i1;i++){
+    var t=i*dt, x3=(t-t0)*pxSec, y3=base-signal(t)*pxMV;
+    if (i===i0) ctx.moveTo(x3,y3); else ctx.lineTo(x3,y3);
+    lx=x3; ly=y3;
+  }
+  ctx.stroke();
+  ctx.fillStyle = col.ink; ctx.beginPath(); ctx.arc(lx,ly,3,0,TAU); ctx.fill();
+
+  // labels
+  ctx.font = '600 14px "Schibsted Grotesk", system-ui, sans-serif';
+  var label = 'Lead II  \u00b7  ' + DXBY[state.dx].name;
+  var tw = ctx.measureText(label).width;
+  ctx.globalAlpha = 0.9; ctx.fillStyle = col.paper; ctx.fillRect(10,10,tw+16,26); ctx.globalAlpha = 1;
+  ctx.fillStyle = col.ink; ctx.textBaseline = 'middle'; ctx.fillText(label,18,23);
+  ctx.font = '500 12px "Schibsted Grotesk", system-ui, sans-serif';
+  var sc = state.speed + ' mm/s  \u00b7  ' + state.gain + ' mm/mV';
+  var sw = ctx.measureText(sc).width;
+  ctx.globalAlpha = 0.9; ctx.fillStyle = col.paper; ctx.fillRect(10,ch-30,sw+16,22); ctx.globalAlpha = 1;
+  ctx.fillStyle = col.muted; ctx.fillText(sc,18,ch-19);
+  dirty = false;
+}
+
+/* ---------- measurements ---------- */
+function measure(){
+  var a = [];
+  for (var i=0;i<beats.length;i++) if (beats[i].t<=now && beats[i].t>now-12) a.push(beats[i].t);
+  if (a.length<4) return null;
+  a = a.slice(-9);
+  var rr = [], m = 0, i2;
+  for (i2=1;i2<a.length;i2++){ rr.push(a[i2]-a[i2-1]); m += rr[rr.length-1]; }
+  m /= rr.length;
+  var sd = 0; rr.forEach(function(x){ sd += (x-m)*(x-m); }); sd = Math.sqrt(sd/rr.length);
+  return { mean:m, cv:sd/m };
+}
+function setRead(id,val,sub,unit){
+  $('r-'+id).textContent = val;
+  if ($('s-'+id)) $('s-'+id).textContent = sub || '';
+  if (unit!==undefined && $('u-'+id)) $('u-'+id).textContent = unit;
+}
+function updateReadouts(){
+  var m = measure(), mode = pf.mode;
+  var hrLo = Math.round(P.hrN*0.8), hrHi = Math.round(P.hrN*1.33);
+  if (mode==='vf'){
+    setRead('hr','—','not measurable'); setRead('rh','Chaotic','no organised beats');
+    setRead('pr','—','no P waves','' ); setRead('qrs','—','no QRS','' ); setRead('qt','—','','');
+    return;
+  }
+  if (m){
+    setRead('hr', Math.round(60/m.mean), 'typical for age: '+hrLo+'\u2013'+hrHi);
+    setRead('rh', m.cv>0.1 ? 'Irregular' : 'Regular', m.cv>0.1 ? 'irregularly irregular' : 'RR varies < 10%');
+  }
+  if (mode==='vt'){
+    setRead('pr','—','no P waves','' );
+    setRead('qrs','Wide','over 120 ms','' );
+    setRead('qt','—','not separable','');
+    return;
+  }
+  if (pf.hasP) setRead('pr', Math.round(pf.pr*1000), 'age norm: '+Math.round(P.prN*1000)+' ms','ms');
+  else setRead('pr','—', mode==='afib' ? 'no P waves' : 'flutter waves instead','');
+  setRead('qrs', Math.round(pf.qrs*1000), 'age norm: '+Math.round(P.qrsN*1000)+' ms','ms');
+  var meanRR = m ? m.mean : 60/pf.hr;
+  setRead('qt', Math.round(pf.qtc*Math.sqrt(meanRR)*1000), 'QTc '+Math.round(pf.qtc*1000)+' ms','ms');
+}
+
+/* ---------- static UI ---------- */
+function updateStatic(){
+  var d = DXBY[state.dx];
+  $('dxname').textContent = d.name;
+  $('dxdesc').textContent = d.desc;
+  var ul = $('dxfeat'); ul.innerHTML = '';
+  d.feat.forEach(function(f){ var li=document.createElement('li'); li.textContent=f; ul.appendChild(li); });
+
+  var eff = $('effects'); eff.innerHTML = '';
+  function row(a,b){
+    var li=document.createElement('li'), s=document.createElement('b'), t=document.createElement('span');
+    s.textContent=a; t.textContent=b; li.appendChild(s); li.appendChild(t); eff.appendChild(li); return t;
+  }
+  row('Rate', Math.round(P.hrN)+' bpm is typical for someone '+ageText(P.age)+'. '+
+      (state.dx==='nsr'?'The trace runs at this rate.':'The diagnosis adjusts it to '+Math.round(pf.hr)+' bpm.'));
+  row('Timing', 'PR '+Math.round(P.prN*1000)+' ms and QRS '+Math.round(P.qrsN*1000)+' ms at this age; body size ('+P.bsa.toFixed(2)+' m\u00b2) sets QRS to '+Math.round(P.qrs*1000)+' ms.');
+  var why = P.ratio<0.9 ? 'a lean chest wall lets more voltage through' :
+            (P.ratio>1.15 ? 'extra body mass damps the voltage' : 'BMI is close to typical');
+  row('Voltage', '\u00d7'+P.amp.toFixed(2)+' overall: age gives \u00d7'+P.ampAge.toFixed(2)+', BMI '+P.bmi.toFixed(1)+' (typical '+P.bmiExp.toFixed(1)+') gives \u00d7'+P.ampBmi.toFixed(2)+'; '+why+'.');
+  if (P.bmi<11 || P.bmi>45){
+    var wn = row('Check', 'This height and weight is unusual for the age, so the voltage change is capped.');
+    wn.className = 'warn';
+  }
+  $('ecg').setAttribute('aria-label', 'Simulated lead II electrocardiogram showing '+d.name+' for a patient '+ageText(P.age));
+}
+function recompute(){
+  P = patientModel(state.age,state.h,state.w);
+  pf = makeProfile(state.dx,P);
+  resetBeats(now-40);
+  updateStatic(); updateReadouts(); dirty = true;
+  updateChips();
+  if (link && link.on) sendConfig();
+}
+
+/* ---------- controls ---------- */
+var sel = $('dx');
+DX.forEach(function(d){ var o=document.createElement('option'); o.value=d.id; o.textContent=d.name; sel.appendChild(o); });
+sel.addEventListener('change', function(){ state.dx = sel.value; recompute(); });
+
+function bindSeg(attr,key){
+  document.querySelectorAll('['+attr+']').forEach(function(b){
+    b.addEventListener('click', function(){
+      state[key] = Number(b.getAttribute(attr));
+      document.querySelectorAll('['+attr+']').forEach(function(o){ o.setAttribute('aria-pressed', o===b ? 'true':'false'); });
+      dirty = true;
+    });
+  });
+}
+bindSeg('data-speed','speed'); bindSeg('data-gain','gain');
+$('noise').addEventListener('change', function(){ state.noise = this.checked; dirty = true; });
+$('pause').addEventListener('click', function(){
+  paused = !paused; this.textContent = paused ? 'Resume' : 'Pause';
+});
+
+var ageEl = $('age'), htEl = $('ht'), wtEl = $('wt');
+function readField(el,lo,hi,fallback){
+  var v = parseFloat(el.value);
+  if (!isFinite(v)) return fallback;
+  return clamp(v,lo,hi);
+}
+function onPatient(commit){
+  var a = readField(ageEl,0,100,state.age), h = readField(htEl,40,230,state.h), w = readField(wtEl,2,250,state.w);
+  state.age=a; state.h=h; state.w=w;
+  if (commit){ ageEl.value=a; htEl.value=h; wtEl.value=w; }
+  recompute();
+}
+[ageEl,htEl,wtEl].forEach(function(el){
+  el.addEventListener('input', function(){ onPatient(false); });
+  el.addEventListener('change', function(){ onPatient(true); });
+});
+function setPatient(a){
+  var t = typicalFor(a);
+  state.age=a; state.h=t.h; state.w=t.w;
+  ageEl.value=a; htEl.value=t.h; wtEl.value=t.w;
+  recompute();
+}
+$('typical').addEventListener('click', function(){ setPatient(state.age); });
+
+var CHIPS = [['Newborn',0.03],['6 months',0.5],['2 years',2],['6 years',6],['14 years',14],['35 years',35],['75 years',75]];
+var chipsEl = $('chips');
+CHIPS.forEach(function(c){
+  var b=document.createElement('button'); b.type='button'; b.className='chip'; b.textContent=c[0];
+  b.setAttribute('aria-pressed','false'); b.dataset.age=c[1];
+  b.addEventListener('click', function(){ setPatient(c[1]); });
+  chipsEl.appendChild(b);
+});
+function updateChips(){
+  chipsEl.querySelectorAll('.chip').forEach(function(b){
+    var a = Number(b.dataset.age), t = typicalFor(a);
+    b.setAttribute('aria-pressed', (Math.abs(state.age-a)<0.001 && state.h===t.h && state.w===t.w) ? 'true':'false');
+  });
+}
+
+/* ---------- ESP32 link (Web Serial) ---------- */
+/* Frame: A5 5A TYPE LEN PAYLOAD CRC8(poly 0x07 over TYPE,LEN,PAYLOAD).
+   TYPE 1 = int16 samples (0.001 mV per count, 250 Hz), TYPE 2 = age,height,weight (float32) + diagnosis index. */
+var link = { on:false, port:null, writer:null, reader:null, sent:null, pending:0, cfgAt:0 };
+var espEls = { btn:$('esp-connect'), status:$('esp-status'), line:$('esp-line'), cls:$('esp-cls'), conf:$('esp-conf'), match:$('esp-match') };
+function crc8(bytes){
+  var c = 0;
+  for (var i=0;i<bytes.length;i++){
+    c ^= bytes[i];
+    for (var k=0;k<8;k++) c = (c & 0x80) ? (((c<<1) ^ 0x07) & 0xFF) : ((c<<1) & 0xFF);
+  }
+  return c;
+}
+function pack(type,payload){
+  var n = payload.length, b = new Uint8Array(n+5);
+  b[0]=0xA5; b[1]=0x5A; b[2]=type; b[3]=n; b.set(payload,4);
+  b[4+n] = crc8(b.subarray(2,4+n));
+  return b;
+}
+function dxIndex(){ for (var i=0;i<DX.length;i++) if (DX[i].id===state.dx) return i; return 255; }
+function espSay(msg, bad){ espEls.status.textContent = msg; espEls.status.className = 'hint' + (bad ? ' warn' : ''); }
+function send(buf){
+  link.pending++;
+  link.writer.write(buf).catch(function(){ espDrop('Lost the connection to the board.'); })
+                        .then(function(){ link.pending--; });
+}
+function sendConfig(){
+  var pl = new Uint8Array(13), dv = new DataView(pl.buffer);
+  dv.setFloat32(0, state.age, true); dv.setFloat32(4, state.h, true); dv.setFloat32(8, state.w, true);
+  dv.setUint8(12, dxIndex());
+  send(pack(2, pl));
+  link.cfgAt = performance.now();
+}
+/* called every animation frame: streams every sample the plot has drawn since last time */
+function pump(){
+  if (!link.on || paused || link.pending > 3) return;
+  var target = Math.floor(now/0.004);
+  if (link.sent === null) link.sent = target;
+  if (target - link.sent > 500) link.sent = target - 100;      // fell far behind (tab was throttled): skip ahead
+  var n = Math.min(target - link.sent, 100);
+  if (performance.now() - link.cfgAt > 2000) sendConfig();      // re-announce patient so a rebooted board catches up
+  if (n <= 0) return;
+  var pl = new Uint8Array(n*2), dv = new DataView(pl.buffer);
+  for (var i=0;i<n;i++){
+    var v = Math.round(signal((link.sent+1+i)*0.004)*1000);      // same signal() the canvas draws
+    dv.setInt16(i*2, Math.max(-32768, Math.min(32767, v)), true);
+  }
+  link.sent += n;
+  send(pack(1, pl));
+}
+function espHandleLine(line){
+  var p = line.split(',');
+  if (p[0] !== 'P' || p.length < 4) return;
+  var cls = parseInt(p[1],10), conf = parseInt(p[2],10), ms = parseInt(p[3],10), hr = parseInt(p[4]||'0',10);
+  if (!(cls >= 0 && cls < DX.length)) return;
+  espEls.line.hidden = false;
+  espEls.cls.textContent = DX[cls].name;
+  espEls.conf.textContent = conf + '% confidence \u00b7 ' + ms + ' ms on core 1' + (hr ? ' \u00b7 ' + hr + ' bpm' : '');
+  var same = (cls === dxIndex());
+  espEls.match.textContent = same ? 'Matches what is being sent' : 'Differs from what is being sent';
+  espEls.match.className = same ? 'ok' : 'warn';
+}
+async function espReadLoop(port){
+  var td = new TextDecoder(), buf = '', reader = port.readable.getReader();
+  link.reader = reader;
+  try {
+    for (;;){
+      var r = await reader.read();
+      if (r.done) break;
+      buf += td.decode(r.value, {stream:true});
+      var i;
+      while ((i = buf.indexOf('\n')) >= 0){ espHandleLine(buf.slice(0,i).trim()); buf = buf.slice(i+1); }
+      if (buf.length > 2000) buf = '';
+    }
+  } catch(e) { /* port closed */ }
+}
+async function espDrop(msg){
+  var was = link.on;
+  link.on = false;
+  try { if (link.reader) await link.reader.cancel(); } catch(e){}
+  try { if (link.writer) link.writer.releaseLock(); } catch(e){}
+  try { if (link.port) await link.port.close(); } catch(e){}
+  link.port = link.writer = link.reader = null; link.sent = null; link.pending = 0;
+  espEls.btn.textContent = 'Connect ESP32'; espEls.line.hidden = true;
+  espSay(msg || 'Disconnected.', was && !!msg);
+}
+async function espConnect(){
+  if (!('serial' in navigator)){
+    espSay('This browser cannot open serial ports. Use Chrome or Edge on a computer, and open this page from a file or an https address.', true);
+    return;
+  }
+  try {
+    var port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    try { await port.setSignals({ dataTerminalReady:false, requestToSend:false }); } catch(e){}
+    link.port = port; link.writer = port.writable.getWriter();
+    espEls.btn.disabled = true;
+    espSay('Connected. Waiting for the board to finish booting \u2026');
+    await new Promise(function(res){ setTimeout(res, 1800); });
+    link.on = true; link.sent = null; link.pending = 0;
+    espEls.btn.disabled = false; espEls.btn.textContent = 'Disconnect';
+    sendConfig();
+    espSay('Streaming 250 samples per second. The board needs about 6 seconds of signal before it shows a prediction.');
+    espReadLoop(port);
+  } catch(e) {
+    espEls.btn.disabled = false;
+    await espDrop(e && e.name === 'NotFoundError' ? 'No port selected.' : 'Could not open the port: ' + (e && e.message ? e.message : e) + '. Close the Arduino serial monitor and try again.');
+  }
+}
+espEls.btn.addEventListener('click', function(){ if (link.on) espDrop('Disconnected.'); else espConnect(); });
+if ('serial' in navigator) navigator.serial.addEventListener('disconnect', function(){ if (link.on) espDrop('The board was unplugged.'); });
+
+/* ---------- loop ---------- */
+var last = performance.now(), lastRead = 0;
+function frame(ts){
+  var dt = Math.min(0.1,(ts-last)/1000); last = ts;
+  if (!paused){ now += dt; ensure(now+1.5); prune(); dirty = true; pump(); }
+  if (++frameN % 60 === 0) readColors();
+  if (dirty) draw();
+  if (ts-lastRead > 250 && !paused){ updateReadouts(); lastRead = ts; }
+  requestAnimationFrame(frame);
+}
+
+if (window.ResizeObserver) new ResizeObserver(resize).observe(cvs); else window.addEventListener('resize', resize);
+if (window.matchMedia){
+  var mq = window.matchMedia('(prefers-color-scheme: dark)');
+  if (mq.addEventListener) mq.addEventListener('change', readColors);
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches){
+    paused = true; $('pause').textContent = 'Resume';
+  }
+}
+new MutationObserver(readColors).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+
+readColors(); resize(); recompute();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
