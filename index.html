@@ -125,6 +125,22 @@ canvas{display:block; width:100%; height:300px}
 @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]) .read .v.good{color:#6FD08C} :root:not([data-theme="light"]) .read .v.warn{color:#E3B341} }
 :root[data-theme="dark"] .read .v.good{color:#6FD08C} :root[data-theme="dark"] .read .v.warn{color:#E3B341}
 body.esp-served #mode-seg [data-mode="serial"], body.esp-served #mode-seg [data-mode="mqtt"]{display:none}
+.noise-panel{margin:14px 0; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px 18px}
+.noise-head{display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:12px}
+.noise-head h2{margin:0}
+.noise-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:14px}
+.noise-row{display:flex; flex-direction:column; gap:4px; padding:10px 12px; background:var(--bg); border:1px solid var(--line); border-radius:8px}
+.noise-row-head{display:flex; align-items:center; gap:8px}
+.noise-row-head strong{font-size:14px; flex:1}
+.noise-row-head .badge{font-size:11px; padding:2px 7px; border-radius:999px; background:var(--tint); color:var(--accent); font-weight:600}
+.noise-sliders{display:flex; flex-direction:column; gap:6px; margin-top:6px}
+.noise-sliders label{font-size:12.5px; color:var(--muted); display:flex; justify-content:space-between}
+.noise-sliders input[type=range]{width:100%; accent-color:var(--accent); cursor:pointer}
+.snr-bar{display:flex; align-items:center; gap:10px; margin-top:8px; padding-top:8px; border-top:1px solid var(--line)}
+.snr-label{font-size:13px; color:var(--muted); min-width:30px}
+.snr-track{flex:1; height:8px; border-radius:4px; background:var(--line); overflow:hidden}
+.snr-fill{height:100%; border-radius:4px; transition:width .3s,background .3s}
+.snr-val{font-size:13px; font-weight:600; min-width:54px; text-align:right; font-variant-numeric:tabular-nums}
 .strip2{margin-top:10px}
 .strip2-head{display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; margin:0 2px 6px}
 .strip2-head strong{font-size:15px}
@@ -165,8 +181,25 @@ pre#esp-log{margin:8px 0 0; padding:10px; background:var(--bg); border:1px solid
         <button type="button" data-gain="20" aria-pressed="false">20 mm/mV</button>
       </div>
     </div>
-    <label class="check"><input type="checkbox" id="noise" checked> Add drift and muscle noise</label>
+    <label class="check"><input type="checkbox" id="noise" checked> Simulator noise (built-in)</label>
     <button type="button" class="btn" id="pause">Pause</button>
+  </section>
+
+  <section class="noise-panel" aria-labelledby="h-noise">
+    <div class="noise-head">
+      <h2 id="h-noise">Noise injection</h2>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button type="button" class="btn" id="noise-all-off">All off</button>
+        <button type="button" class="btn" id="noise-preset-med">Medium preset</button>
+        <button type="button" class="btn" id="noise-preset-high">High preset</button>
+      </div>
+    </div>
+    <div class="noise-grid" id="noise-grid"></div>
+    <div class="snr-bar">
+      <span class="snr-label">SNR</span>
+      <div class="snr-track"><div class="snr-fill" id="snr-fill"></div></div>
+      <span class="snr-val" id="snr-val">—</span>
+    </div>
   </section>
 
   <div class="strip">
@@ -670,6 +703,165 @@ function updateChips(){
   });
 }
 
+/* ---------- noise injection ---------- */
+/* Six noise types added to signal(t) before any byte is sent to the ESP32.
+   Each type has an on/off toggle and one or two parameter sliders.
+   The results are summed on top of the ECG signal the simulator already generates. */
+
+var NOISE_DEFS = [
+  { id:'bw',    name:'Baseline wander',     desc:'Slow breathing-like drift',
+    params:[{k:'amp', label:'Amplitude (mV)', min:0, max:2,   step:0.05, def:0.3}] },
+  { id:'emg',   name:'Muscle noise (EMG)',  desc:'High-frequency tremor',
+    params:[{k:'amp', label:'Amplitude (mV)', min:0, max:0.5,  step:0.01, def:0.1}] },
+  { id:'pl',    name:'Powerline (50 Hz)',   desc:'Mains interference',
+    params:[{k:'amp', label:'Amplitude (mV)', min:0, max:0.3,  step:0.01, def:0.05},
+            {k:'freq',label:'Frequency (Hz)', min:45,max:65,  step:5,    def:50}] },
+  { id:'spike', name:'Random spikes',       desc:'Loose electrode transients',
+    params:[{k:'rate',label:'Rate (per s)',   min:0, max:5,    step:0.1,  def:1.0},
+            {k:'h',   label:'Height (mV)',    min:1, max:10,   step:0.5,  def:3.0}] },
+  { id:'drop',  name:'Signal dropout',      desc:'Short flat sections',
+    params:[{k:'rate',label:'Rate (per s)',   min:0, max:3,    step:0.1,  def:0.5},
+            {k:'dur', label:'Duration (ms)',  min:10,max:200,  step:10,   def:80}] },
+  { id:'gauss', name:'Gaussian noise',      desc:'Broadband white noise',
+    params:[{k:'std',  label:'Std dev (mV)', min:0, max:0.3,  step:0.005, def:0.06}] }
+];
+
+var noiseCfg = {};
+window.noiseCfg = noiseCfg;
+NOISE_DEFS.forEach(function(d){
+  noiseCfg[d.id] = { on: false };
+  window.noiseCfg = noiseCfg;
+  d.params.forEach(function(p){ noiseCfg[d.id][p.k] = p.def; });
+});
+
+/* ---- noise functions (exact match of noise_lib.py for training parity) ---- */
+var _nRng = (function(){ var a=0x12345678; return function(){ a|=0; a=a+0x6D2B79F5|0; var t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; })();
+var _nSeed = 0;
+function _noiseSine(t, amp, f1, f2, ph1, ph2){
+  return amp*(0.7*Math.sin(2*Math.PI*f1*t+ph1)+0.3*Math.sin(2*Math.PI*f2*t+ph2));
+}
+/* We reuse the simulator's own now/signal() time base, so we only need additive terms at time t */
+function noiseAt(t){
+  var v = 0, cfg = noiseCfg;
+  if (cfg.bw.on){
+    v += cfg.bw.amp*(0.7*Math.sin(2*Math.PI*0.27*t+0.5)+0.3*Math.sin(2*Math.PI*0.09*t+1.3));
+  }
+  if (cfg.emg.on){
+    // deterministic high-frequency noise (phase locked to t for reproducibility)
+    v += cfg.emg.amp*(Math.sin(2*Math.PI*43.7*t)+0.9*Math.sin(2*Math.PI*67.3*t+1.2)+0.8*Math.sin(2*Math.PI*89.1*t+2.4))/2.2;
+  }
+  if (cfg.pl.on){
+    v += cfg.pl.amp*(Math.sin(2*Math.PI*cfg.pl.freq*t)+0.18*Math.sin(2*Math.PI*3*cfg.pl.freq*t+0.4));
+  }
+  if (cfg.spike.on && cfg.spike.rate > 0){
+    // simple pseudo-random spike: triggered when frac(rate*t) crosses 0 near a random phase
+    var ph = (cfg.spike.rate * t) % 1.0;
+    var prev_ph = (cfg.spike.rate * (t - 0.004)) % 1.0;
+    if (ph < 0.01 && prev_ph > 0.99){
+      // deterministic spike height based on t
+      var sh = cfg.spike.h * (0.5 + 0.5*Math.abs(Math.sin(1234.5*t)));
+      v += sh * Math.exp(-Math.pow(ph / 0.005, 2));
+    }
+  }
+  if (cfg.drop.on && cfg.drop.rate > 0){
+    // returns 0 when in dropout, current value otherwise
+    // We implement this as a gain factor: 0 during dropout windows
+    var dropPeriod = 1.0 / cfg.drop.rate;
+    var phase = t % dropPeriod;
+    if (phase < cfg.drop.dur / 1000) return null;   // null means "flat hold"
+  }
+  if (cfg.gauss.on && cfg.gauss.std > 0){
+    // simple box-Muller with t-derived seed
+    var u1 = (Math.sin(t*12.9898+42)*43758.5453)%1; u1=Math.abs(u1)||1e-9;
+    var u2 = (Math.sin(t*78.233+17)*12345.678)%1;
+    v += cfg.gauss.std * Math.sqrt(-2*Math.log(u1)) * Math.cos(2*Math.PI*u2);
+  }
+  return v;
+}
+
+/* SNR estimate: ratio of pure signal std to injected noise std */
+var _lastSnrT = 0, _snrDb = null;
+function updateSnr(){
+  if (now - _lastSnrT < 1.0) return;
+  _lastSnrT = now;
+  var N = 500, dt = 0.004, t0 = now - N*dt, sig2=0, noi2=0, any=false;
+  for (var i=0;i<N;i++){
+    var t=t0+i*dt;
+    var clean=signal(t), added=noiseAt(t);
+    if (added===null){ sig2+=clean*clean; continue; }
+    sig2+=clean*clean; noi2+=added*added; any=true;
+  }
+  if (!any || sig2<1e-9){ _snrDb=null; }
+  else { var ratio=Math.sqrt(sig2/Math.max(noi2,1e-9)); _snrDb = 20*Math.log10(ratio); }
+  var el=$('snr-val'), fill=$('snr-fill');
+  if (_snrDb===null){ el.textContent='—'; fill.style.width='100%'; fill.style.background='var(--ok)'; }
+  else {
+    el.textContent=_snrDb.toFixed(1)+' dB';
+    var pct=Math.min(100,Math.max(0,(_snrDb+20)*100/50));
+    fill.style.width=pct+'%';
+    fill.style.background=_snrDb>10?'var(--ok)':(_snrDb>0?'var(--warn)':'var(--danger,#B3261E)');
+  }
+}
+
+/* ---- patch signal() to add noise ---- */
+var _baseSignal = signal;
+window.signal_raw=_baseSignal;
+window.updateSnr=function(){};
+window.noiseAt=noiseAt;
+signal = function(t){
+  var v = _baseSignal(t);
+  var n = noiseAt(t);
+  if (n === null) return v;   // dropout: page draws the flat value (last real value)
+  return v + n;
+};
+
+/* ---- build the noise control UI ---- */
+(function buildNoiseUI(){
+  var grid = $('noise-grid');
+  NOISE_DEFS.forEach(function(d){
+    var card = document.createElement('div'); card.className='noise-row';
+    var head = '<div class="noise-row-head">' +
+      '<label class="check" style="margin:0;flex:1"><input type="checkbox" data-nid="'+d.id+'"> <strong>'+d.name+'</strong></label>' +
+      '<span class="badge">'+d.desc+'</span></div>';
+    var sliders = '<div class="noise-sliders">';
+    d.params.forEach(function(p){
+      sliders += '<label>'+p.label+' <span id="nv-'+d.id+'-'+p.k+'">'+p.def+'</span></label>' +
+        '<input type="range" data-nid="'+d.id+'" data-nk="'+p.k+'" min="'+p.min+'" max="'+p.max+'" step="'+p.step+'" value="'+p.def+'">';
+    });
+    sliders += '</div>';
+    card.innerHTML = head + sliders; grid.appendChild(card);
+  });
+  grid.addEventListener('change', function(e){
+    var el=e.target, nid=el.dataset.nid, nk=el.dataset.nk;
+    if (!nid) return;
+    if (el.type==='checkbox'){ noiseCfg[nid].on=el.checked; }
+    else { var v=parseFloat(el.value); noiseCfg[nid][nk]=v; var lbl=$('nv-'+nid+'-'+nk); if(lbl) lbl.textContent=v; }
+    dirty=true; if (link.on && link.mult===1) sendConfig();   // update the board with the new noise setting context
+  });
+  function applyPreset(preset){
+    var presets = {
+      off:   { bw:{on:false,amp:0.3}, emg:{on:false,amp:0.1}, pl:{on:false,amp:0.05,freq:50}, spike:{on:false,rate:1,h:3}, drop:{on:false,rate:0.5,dur:80}, gauss:{on:false,std:0.06} },
+      med:   { bw:{on:true,amp:0.25}, emg:{on:true,amp:0.08}, pl:{on:true,amp:0.04,freq:50},  spike:{on:false,rate:0.5,h:2.5}, drop:{on:false,rate:0.3,dur:60}, gauss:{on:true,std:0.05} },
+      high:  { bw:{on:true,amp:0.5},  emg:{on:true,amp:0.18}, pl:{on:true,amp:0.08,freq:50},  spike:{on:true,rate:1.5,h:4}, drop:{on:true,rate:0.4,dur:80}, gauss:{on:true,std:0.12} }
+    };
+    var p=presets[preset];
+    NOISE_DEFS.forEach(function(d){
+      var pc=p[d.id]; Object.assign(noiseCfg[d.id],pc);
+      var cb=grid.querySelector('input[type="checkbox"][data-nid="'+d.id+'"]');
+      if(cb) cb.checked=pc.on;
+      d.params.forEach(function(pr){
+        var sl=grid.querySelector('input[type="range"][data-nid="'+d.id+'"][data-nk="'+pr.k+'"]');
+        var lbl=$('nv-'+d.id+'-'+pr.k);
+        if(sl){ sl.value=pc[pr.k]; if(lbl) lbl.textContent=pc[pr.k]; }
+      });
+    });
+    dirty=true;
+  }
+  $('noise-all-off').addEventListener('click',function(){ applyPreset('off'); });
+  $('noise-preset-med').addEventListener('click',function(){ applyPreset('med'); });
+  $('noise-preset-high').addEventListener('click',function(){ applyPreset('high'); });
+})();
+
 /* ---------- ESP32 link: USB (Web Serial) or WiFi (MQTT over WebSocket) ---------- */
 /* Frame: A5 5A TYPE LEN PAYLOAD CRC8(poly 0x07 over TYPE,LEN,PAYLOAD).
    TYPE 1 = int16 samples (0.001 mV per count, 250 Hz), TYPE 2 = age,height,weight (float32) + diagnosis index.
@@ -1080,6 +1272,7 @@ function frame(ts){
   if (++frameN % 60 === 0) readColors();
   if (dirty) draw();
   drawEcho();
+  updateSnr();
   if (ts-lastRead > 250 && !paused){ updateReadouts(); lastRead = ts; }
   requestAnimationFrame(frame);
 }
