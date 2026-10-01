@@ -874,45 +874,52 @@ signal = function(t){
 })();
 
 
-/* ---------- page-side cascade filter (mirrors ecg_ml.h pt_filter) ---------- */
-/* Runs at 125 Hz on the decimated signal. Shows what the ESP32's ML model sees.
-   This runs locally so strip 3 is always visible, even without the board connected.
-   When the board IS connected, strip 3 shows the board's own echoed filtered samples. */
+/* ---------- page-side cascade filter (exact mirror of ecg_ml.h pt_filter) ---------- */
+/* Runs at 125 Hz on the decimated signal. Always visible - no board needed.
+   When the board IS connected, strip 3 switches to showing the board's own filtered samples.
+   Filter: IIR single-pole HP (0.5 Hz) + 7-tap median + 3-tap MA  */
 var PAGE_FILTER_BUF = 4096;
-var pfBuf  = new Float32Array(PAGE_FILTER_BUF);   // filtered 125 Hz ring
-var pfHead = 0, pfTotal = 0;
+var pfBuf    = new Float32Array(PAGE_FILTER_BUF);  // HP-only output ring (for median window)
+var pfOut    = new Float32Array(PAGE_FILTER_BUF);  // final MA-smoothed output ring
+var pfHead   = 0, pfTotal = 0;
 var pfDecAcc = 0, pfDecPhase = 0;
-// IIR high-pass state
-var pfHpX = 0, pfHpY = 0;
-var pfHpAlpha = 0.9753;   // 0.5 Hz cutoff at 125 Hz: RC/(RC+dt), RC=1/(2*pi*0.5), dt=1/125
+var pfHpX    = 0.0, pfHpY = 0.0;
+var PF_ALPHA = 0.97492;   // alpha = RC/(RC+dt), RC=1/(2*pi*0.5), dt=1/125
 
-// Feed one 250 Hz sample (raw mV) into the page-side filter
+// Feed one 250 Hz sample (raw mV, noise included) into the page filter
 function pfFeed(x) {
   pfDecAcc += x;
   if (++pfDecPhase === 2) {
-    var s = pfDecAcc * 0.5;  // 250->125 Hz average
+    var s125 = pfDecAcc * 0.5;   // 250 -> 125 Hz average
     pfDecAcc = 0; pfDecPhase = 0;
-    // Stage 1: IIR high-pass
-    var hp = pfHpAlpha * (pfHpY + s - pfHpX);
-    pfHpX = s; pfHpY = hp;
-    // Stage 2 & 3: approximated with a simple 7-tap median then 5-tap MA
-    // For real-time we use a lighter approximation: 5-tap MA only (median needs buffering)
-    // Store raw HP output; we'll apply the window-median when drawing
+    // Stage 1: IIR single-pole high-pass (removes baseline wander, fc=0.5 Hz)
+    var hp = PF_ALPHA * (pfHpY + s125 - pfHpX);
+    pfHpX = s125; pfHpY = hp;
     pfBuf[pfHead % PAGE_FILTER_BUF] = hp;
     pfHead++; pfTotal++;
+    // Stage 2: 7-tap median centred at pfHead-4 (3 samples of latency)
+    if (pfHead >= 7) {
+      var med_i = pfHead - 4;  // centre of the 7-tap window
+      var w7 = [0,0,0,0,0,0,0];
+      for (var k2=0;k2<7;k2++) w7[k2] = pfBuf[(med_i - 3 + k2 + PAGE_FILTER_BUF*2) % PAGE_FILTER_BUF];
+      w7.sort(function(a,b){return a-b;});
+      var med_val = w7[3];
+      // Stage 3: 3-tap causal moving average (light HF smoothing)
+      var ma_i = med_i % PAGE_FILTER_BUF;
+      // accumulate into pfOut at med_i (we track separately from pfBuf)
+      pfOut[ma_i] = (pfOut[(ma_i-1+PAGE_FILTER_BUF)%PAGE_FILTER_BUF] * 2 + med_val) / 3.0;
+    }
   }
 }
 
 function pfReset() {
-  pfBuf.fill(0); pfHead = 0; pfTotal = 0;
-  pfDecAcc = 0; pfDecPhase = 0; pfHpX = 0; pfHpY = 0;
+  pfBuf.fill(0); pfOut.fill(0); pfHead = 0; pfTotal = 0;
+  pfDecAcc = 0; pfDecPhase = 0; pfHpX = 0.0; pfHpY = 0.0;
 }
 
-// Get the smoothed value at ring index i (5-tap causal moving average)
+// Get the final filtered value at 125 Hz sample index i
 function pfGet(i) {
-  var s = 0, k;
-  for (k = 0; k < 5; k++) s += pfBuf[(i - k + PAGE_FILTER_BUF) % PAGE_FILTER_BUF];
-  return s / 5.0;
+  return pfOut[i % PAGE_FILTER_BUF];
 }
 
 window.pfBuf=pfBuf; window.pfFeed=pfFeed; window.pfGet=pfGet; window.pfReset=pfReset; window.pfHead_ref=function(){return pfHead;}; window.pfTotal_ref=function(){return pfTotal;};
